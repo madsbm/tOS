@@ -1,4 +1,4 @@
-use core::{cell::UnsafeCell, sync::atomic::Ordering};
+use core::{cell::UnsafeCell, cmp::Ordering, sync::atomic::Ordering};
 
 pub struct AtomicU128 {
     v: UnsafeCell<u128>,
@@ -11,9 +11,14 @@ impl AtomicU128 {
         }
     }
 
+    pub fn load(&self, order: Ordering) -> u128 {
+        self.compare_exchange(0, 0, order, order)
+            .unwrap_or_else(|val| val)
+    }
+
     #[cfg(all(target_arch = "x86_64", target_feature = "cmpxchg16b"))]
     pub fn compare_exchange(
-        &mut self,
+        &self,
         old: u128,
         new: u128,
         success: Ordering,
