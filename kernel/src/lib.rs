@@ -8,7 +8,6 @@
 #![reexport_test_harness_main = "test_main"]
 
 pub mod allocator;
-pub mod arch;
 pub mod filesystem;
 pub mod io;
 pub mod sync;
