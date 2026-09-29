@@ -1,4 +1,9 @@
-use core::{cell::UnsafeCell, cmp::Ordering, sync::atomic::Ordering};
+use core::{cell::UnsafeCell, sync::atomic::Ordering};
+
+use crate::arch::x86_64::atomics::atomic_load;
+
+// The Atomic{U,I}128 hasnt yet been stabilized,
+// thus we're rolling our own (as that's always a good idea!).
 
 pub struct AtomicU128 {
     v: UnsafeCell<u128>,
@@ -12,10 +17,10 @@ impl AtomicU128 {
     }
 
     pub fn load(&self, order: Ordering) -> u128 {
-        self.compare_exchange(0, 0, order, order)
-            .unwrap_or_else(|val| val)
+        atomic_load(&self.v, order)
     }
 
+    #[inline]
     #[cfg(all(target_arch = "x86_64", target_feature = "cmpxchg16b"))]
     pub fn compare_exchange(
         &self,

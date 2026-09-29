@@ -3,6 +3,7 @@ use core::{
     ops::{Deref, DerefMut},
 };
 
+pub mod atomics;
 pub mod relax;
 pub mod ring;
 pub mod rwlock;

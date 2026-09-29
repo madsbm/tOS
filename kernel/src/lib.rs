@@ -1,4 +1,6 @@
 #![no_std]
+#![allow(internal_features)]
+#![feature(core_intrinsics)]
 #![cfg_attr(test, no_main)]
 #![feature(custom_test_frameworks)]
 #![feature(abi_x86_interrupt)]

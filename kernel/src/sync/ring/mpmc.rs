@@ -6,7 +6,7 @@ use core::{
 };
 
 use crate::{
-    arch::x86_64::atomic128::AtomicU128,
+    arch::x86_64::atomics::atomic128::AtomicU128,
     sync::ring::{Ring, Slot},
 };
 
