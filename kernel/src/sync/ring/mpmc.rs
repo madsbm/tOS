@@ -1,8 +1,9 @@
 use core::{
     cell::UnsafeCell,
     marker::PhantomData,
-    mem::MaybeUninit,
-    sync::atomic::{AtomicUsize, Ordering},
+    mem::{ManuallyDrop, MaybeUninit},
+    ops::{BitAnd, BitOr},
+    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 
 use crate::sync::{
@@ -10,72 +11,187 @@ use crate::sync::{
     ring::{Ring, Slot},
 };
 
-pub unsafe trait QueuePayload: Sized {
-    fn into_bytes(self) -> [u8; 12];
-    fn from_bytes(bytes: [u8; 12]) -> Self;
-}
-
 #[repr(transparent)]
-pub struct AtomicSlotEntry(AtomicU128);
+pub struct AtomicSlotFieldState(AtomicU32);
 
-impl AtomicSlotEntry {
+impl AtomicSlotFieldState {
     pub const fn empty() -> Self {
-        Self(AtomicU128::new(0))
+        Self(AtomicU32::new(0))
+    }
+
+    pub const fn from_seq(val: u32) -> Self {
+        Self::from(val << 1)
+    }
+
+    pub const fn from(val: u32) -> Self {
+        Self(AtomicU32::new(val))
     }
 
     #[inline]
-    pub fn load(&self, order: Ordering) -> u128 {
+    pub fn load(&self, order: Ordering) -> u32 {
         self.0.load(order)
     }
 
     #[inline]
-    pub fn store(&self, order: Ordering, val: u128) {
+    pub fn store(&self, order: Ordering, val: u32) {
         self.0.store(val, order);
     }
 
     #[inline]
-    pub fn ready(&self, load_with: Ordering) -> bool {
-        (self.load(load_with) & 1) > 0
+    pub fn ready(&self) -> bool {
+        (self.load(Ordering::Acquire) & 1) > 0
     }
 
     #[inline]
-    pub fn seq_num(&self, load_with: Ordering) -> u128 {
-        self.load(load_with) >> 1
+    pub fn seq_num(&self) -> u32 {
+        self.load(Ordering::Relaxed) >> 1
     }
 }
 
-pub struct AtomicSlot<T> {
-    pub seq: AtomicSlotEntry,
-    pub value: UnsafeCell<MaybeUninit<T>>,
+#[repr(C, align(64))]
+pub struct AtomicSlotFields<T> {
+    state: AtomicSlotFieldState,
+    value: UnsafeCell<MaybeUninit<T>>,
+}
+
+impl<T> AtomicSlotFields<T> {
+    pub const fn new(state: AtomicSlotFieldState, value: T) -> Self {
+        Self {
+            state,
+            value: UnsafeCell::new(MaybeUninit::new(value)),
+        }
+    }
+
+    pub const fn new_unused(state: AtomicSlotFieldState) -> Self {
+        Self {
+            state,
+            value: UnsafeCell::new(MaybeUninit::zeroed()),
+        }
+    }
+
+    pub const fn empty_with_seq(seq: u32) -> Self {
+        Self {
+            state: AtomicSlotFieldState::from_seq(seq),
+            value: UnsafeCell::new(MaybeUninit::zeroed()),
+        }
+    }
+
+    pub fn pack(self) -> u128 {
+        unimplemented!()
+    }
+}
+
+#[repr(C, align(64))]
+pub union AtomicSlot<T> {
+    packed: ManuallyDrop<AtomicU128>,
+    fields: ManuallyDrop<AtomicSlotFields<T>>,
 }
 
 impl<T> AtomicSlot<T> {
     pub const fn empty() -> Self {
+        Self::empty_with_seq(0)
+    }
+
+    pub const fn empty_with_seq(seq: u32) -> Self {
         Self {
-            seq: AtomicSlotEntry::empty(),
-            value: UnsafeCell::new(MaybeUninit::uninit()),
+            fields: ManuallyDrop::new(AtomicSlotFields::empty_with_seq(seq)),
         }
+    }
+
+    #[inline]
+    pub fn ready(&self) -> bool {
+        unsafe { self.fields.state.ready() }
+    }
+
+    #[inline]
+    pub fn seq(&self) -> u32 {
+        unsafe { self.fields.state.seq_num() }
+    }
+
+    pub fn state(&self) -> u32 {
+        unsafe { self.fields.state.load(Ordering::Acquire) }
     }
 }
 
-impl<T> Slot<T> for AtomicSlot<T> {}
+impl<T> Slot<T> for AtomicSlot<T> {
+    fn ready(&self) -> bool {
+        self.ready()
+    }
+
+    unsafe fn drop_value(&mut self) {
+        if self.ready() {
+            unsafe {
+                let cell = self.fields.value.get();
+                let val_ptr = (*cell).as_mut_ptr();
+                core::ptr::drop_in_place(val_ptr);
+            }
+        }
+    }
+}
 
 impl<T, const N: usize> Ring<AtomicSlot<T>, T, N> {
     pub const fn new() -> Self {
         Self {
-            ring: [const { AtomicSlot::empty() }; N],
+            ring: const { Self::init_ring() },
             _marker: PhantomData,
         }
     }
+
+    const fn init_ring() -> [AtomicSlot<T>; N] {
+        let mut ring = [const { AtomicSlot::empty() }; N];
+
+        let mut i = 0;
+        while i < N {
+            ring[i] = AtomicSlot::empty_with_seq(i as u32);
+            i += 1;
+        }
+
+        ring
+    }
 }
 
-pub struct MpmcRing<T, const N: usize> {
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Flags(u8);
+
+impl Flags {
+    pub const NONE: Self = Self(0);
+
+    pub const LAZY_PUSH: Self = Self(1 << 0);
+    pub const LAZY_POP: Self = Self(1 << 1);
+
+    pub const fn from(val: u8) -> Self {
+        Self(val)
+    }
+
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub const fn contains(self, other: Flags) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn union(self, other: Flags) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl BitOr for Flags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self.union(rhs)
+    }
+}
+
+pub struct MpmcRing<T, const N: usize, const FLAGS: u8> {
     ring: Ring<AtomicSlot<T>, T, N>,
     read_idx: AtomicUsize,
     write_idx: AtomicUsize,
 }
 
-impl<T, const N: usize> MpmcRing<T, N> {
+impl<T, const N: usize, const FLAGS: u8> MpmcRing<T, N, FLAGS> {
     pub const fn new() -> Self {
         Self {
             ring: Ring::<AtomicSlot<T>, T, N>::new(),
@@ -84,14 +200,68 @@ impl<T, const N: usize> MpmcRing<T, N> {
         }
     }
 
+    pub const fn flags() -> Flags {
+        Flags(FLAGS)
+    }
+
+    pub const fn lazy_push() -> bool {
+        Self::flags().contains(Flags::LAZY_PUSH)
+    }
+
+    pub const fn lazy_pop() -> bool {
+        Self::flags().contains(Flags::LAZY_POP)
+    }
+
     pub fn try_push(&self, value: T) -> bool {
-        let pos = self.write_idx.load(Ordering::Relaxed);
-        let slot = &self.ring[pos];
+        loop {
+            let pos = self.write_idx.load(Ordering::Relaxed);
+            let slot = &self.ring[pos];
 
-        let seq = slot.seq.load(Ordering::Acquire);
-        if seq == pos as u128 {}
+            let slot_state = slot.state();
+            // Slot doesnt hold data (LSB = 0) and FIFO matches
+            if slot_state == (pos << 1) as u32 {
+                // FIXME
+                let old = AtomicSlotFields::<T>::new_unused(AtomicSlotFieldState::from(pos)).pack();
+                let new = AtomicSlotFields::<T>::new(AtomicSlotFieldState::from(pos), value).pack();
 
-        unimplemented!()
+                match unsafe {
+                    slot.packed
+                        .compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst)
+                } {
+                    Err(_) => continue,
+                    Ok(_) => {
+                        if const { !Self::lazy_push() } {
+                            let _ = self.write_idx.compare_exchange(
+                                pos,
+                                pos + 1,
+                                Ordering::Release,
+                                Ordering::Relaxed,
+                            );
+                        }
+
+                        return true;
+                    }
+                }
+            // Case A: help the thread who got the spot with advancing the write idx
+            // Case B: this slot was already produced and consumed before we saw it, but we can help advance the write idx.
+            } else if (slot_state == ((pos << 1) | 1usize) as u32)
+                || (slot_state == ((pos + N) << 1) as u32)
+            {
+                let _ = self.write_idx.compare_exchange(
+                    pos,
+                    pos + 1,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                );
+            // Ringbuffer is full, we cant overwrite :,(
+            } else if slot_state == (((pos - N) << 1) | 1usize) as u32 {
+                return false;
+            }
+        }
+    }
+
+    pub fn polled_push(&self, value: T) {
+        while !self.try_push(value) {}
     }
 
     pub fn poll(&self) -> Option<T> {

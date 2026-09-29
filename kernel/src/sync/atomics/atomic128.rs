@@ -5,6 +5,7 @@ use crate::sync::atomics::{atomic_cmpxchg, atomic_load, atomic_store};
 // The Atomic{U,I}128 hasnt yet been stabilized,
 // thus we're rolling our own (as that's always a good idea!).
 
+#[repr(C, align(16))]
 pub struct AtomicU128 {
     v: UnsafeCell<u128>,
 }

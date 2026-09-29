@@ -4,7 +4,11 @@ pub mod mpmc;
 pub mod mpsc;
 pub mod spsc;
 
-pub trait Slot<T> {}
+pub trait Slot<T> {
+    fn ready(&self) -> bool;
+
+    unsafe fn drop_value(&mut self);
+}
 
 pub struct SimpleSlot<T> {
     value: UnsafeCell<MaybeUninit<T>>,
@@ -18,7 +22,15 @@ impl<T> SimpleSlot<T> {
     }
 }
 
-impl<T> Slot<T> for SimpleSlot<T> {}
+impl<T> Slot<T> for SimpleSlot<T> {
+    fn ready(&self) -> bool {
+        unimplemented!()
+    }
+
+    unsafe fn drop_value(&mut self) {
+        unimplemented!()
+    }
+}
 
 pub struct Ring<S, T, const N: usize>
 where
@@ -46,4 +58,21 @@ where
     fn index(&self, index: usize) -> &Self::Output {
         &self.ring[index]
     }
+}
+
+impl<S: Slot<T>, T, const N: usize> Drop for Ring<S, T, N> {
+    fn drop(&mut self) {
+        for i in 0..N {
+            let slot = &mut self.ring[i];
+            unsafe { slot.drop_value() };
+        }
+    }
+}
+
+pub trait Queue<T> {
+    fn push(&self, val: T) -> Result<(), T>;
+
+    fn pop(&self) -> Option<T>;
+
+    fn is_empty(&self) -> Option<T>;
 }
