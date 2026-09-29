@@ -5,9 +5,9 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use crate::{
-    arch::x86_64::atomics::atomic128::AtomicU128,
-    sync::ring::{Ring, Slot},
+use crate::sync::{
+    atomics::atomic128::AtomicU128,
+    ring::{Ring, Slot},
 };
 
 pub unsafe trait QueuePayload: Sized {

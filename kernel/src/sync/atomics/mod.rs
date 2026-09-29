@@ -40,3 +40,15 @@ unsafe fn atomic_store<T: Copy>(dst: *mut T, val: T, order: Ordering) {
         }
     }
 }
+
+#[inline]
+unsafe fn atomic_cmpxchg<T: Copy>(
+    dst: *mut T,
+    old: T,
+    new: T,
+    success: Ordering,
+    failure: Ordering,
+) -> Result<T, T> {
+    // This is internal, but it's okay! We can sin - just dont update your compiler too often :)
+    unsafe { core::sync::atomic::atomic_compare_exchange(dst, old, new, success, failure) }
+}

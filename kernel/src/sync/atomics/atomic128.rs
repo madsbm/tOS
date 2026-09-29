@@ -1,6 +1,6 @@
 use core::{cell::UnsafeCell, sync::atomic::Ordering};
 
-use crate::arch::x86_64::atomics::atomic_load;
+use crate::sync::atomics::{atomic_load, atomic_store};
 
 // The Atomic{U,I}128 hasnt yet been stabilized,
 // thus we're rolling our own (as that's always a good idea!).
@@ -17,7 +17,11 @@ impl AtomicU128 {
     }
 
     pub fn load(&self, order: Ordering) -> u128 {
-        atomic_load(&self.v, order)
+        unsafe { atomic_load(self.v.get(), order) }
+    }
+
+    pub fn store(&self, val: u128, order: Ordering) {
+        unsafe { atomic_store(self.v.get(), val, order) }
     }
 
     #[inline]
