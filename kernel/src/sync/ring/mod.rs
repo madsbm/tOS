@@ -4,7 +4,7 @@ pub mod mpmc;
 pub mod mpsc;
 pub mod spsc;
 
-pub trait Slot<T> {
+pub trait Slot {
     fn ready(&self) -> bool;
 
     unsafe fn drop_value(&mut self);
@@ -22,7 +22,7 @@ impl<T> SimpleSlot<T> {
     }
 }
 
-impl<T> Slot<T> for SimpleSlot<T> {
+impl<T> Slot for SimpleSlot<T> {
     fn ready(&self) -> bool {
         unimplemented!()
     }
@@ -34,7 +34,7 @@ impl<T> Slot<T> for SimpleSlot<T> {
 
 pub struct Ring<S, T, const N: usize>
 where
-    S: Slot<T>,
+    S: Slot,
 {
     ring: [S; N],
     _marker: PhantomData<T>,
@@ -51,7 +51,7 @@ impl<T, const N: usize> Ring<SimpleSlot<T>, T, N> {
 
 impl<S, T, const N: usize> Index<usize> for Ring<S, T, N>
 where
-    S: Slot<T>,
+    S: Slot,
 {
     type Output = S;
 
@@ -60,7 +60,7 @@ where
     }
 }
 
-impl<S: Slot<T>, T, const N: usize> Drop for Ring<S, T, N> {
+impl<S: Slot, T, const N: usize> Drop for Ring<S, T, N> {
     fn drop(&mut self) {
         for i in 0..N {
             let slot = &mut self.ring[i];
