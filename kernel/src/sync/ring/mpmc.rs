@@ -1,5 +1,6 @@
 use core::{
     cell::UnsafeCell,
+    hint,
     marker::PhantomData,
     mem::{ManuallyDrop, MaybeUninit},
     ops::{BitAnd, BitOr},
@@ -47,6 +48,8 @@ impl AtomicSlotFieldState {
         self.load(Ordering::Relaxed) >> 1
     }
 }
+
+pub struct AtomicSlotPayload {}
 
 #[repr(C, align(64))]
 pub struct AtomicSlotFields<T> {
@@ -157,8 +160,9 @@ pub struct Flags(u8);
 impl Flags {
     pub const NONE: Self = Self(0);
 
-    pub const LAZY_PUSH: Self = Self(1 << 0);
-    pub const LAZY_POP: Self = Self(1 << 1);
+    pub const USE_DWCAS: Self = Self(1 << 0);
+    pub const LAZY_PUSH: Self = Self(1 << 1);
+    pub const LAZY_POP: Self = Self(1 << 2);
 
     pub const fn from(val: u8) -> Self {
         Self(val)
@@ -192,7 +196,16 @@ pub struct MpmcRing<T, const N: usize, const FLAGS: u8> {
 }
 
 impl<T, const N: usize, const FLAGS: u8> MpmcRing<T, N, FLAGS> {
+    pub const LOG_CAP: usize = {
+        assert!(N.count_ones() == 1, "N must be a power of two!");
+        N.trailing_zeros() as usize
+    };
+    pub const STATE_BITS: usize = Self::LOG_CAP + 1;
+    pub const PAYLOAD_BITS: usize = Self::slot_size() - Self::STATE_BITS;
+
     pub const fn new() -> Self {
+        assert!(N.is_power_of_two());
+
         Self {
             ring: Ring::<AtomicSlot<T>, T, N>::new(),
             read_idx: AtomicUsize::new(0),
@@ -204,6 +217,10 @@ impl<T, const N: usize, const FLAGS: u8> MpmcRing<T, N, FLAGS> {
         Flags(FLAGS)
     }
 
+    pub const fn uses_dwcas() -> bool {
+        Self::flags().contains(Flags::USE_DWCAS)
+    }
+
     pub const fn lazy_push() -> bool {
         Self::flags().contains(Flags::LAZY_PUSH)
     }
@@ -212,7 +229,16 @@ impl<T, const N: usize, const FLAGS: u8> MpmcRing<T, N, FLAGS> {
         Self::flags().contains(Flags::LAZY_POP)
     }
 
-    pub fn try_push(&self, value: T) -> bool {
+    pub const fn slot_size() -> usize {
+        // FIXME
+        if const { Self::uses_dwcas() } {
+            128
+        } else {
+            64
+        }
+    }
+
+    pub fn try_push(&self, value: T) -> Result<(), T> {
         loop {
             let pos = self.write_idx.load(Ordering::Relaxed);
             let slot = &self.ring[pos];
@@ -239,7 +265,7 @@ impl<T, const N: usize, const FLAGS: u8> MpmcRing<T, N, FLAGS> {
                             );
                         }
 
-                        return true;
+                        return Ok(());
                     }
                 }
             // Case A: help the thread who got the spot with advancing the write idx
@@ -255,13 +281,16 @@ impl<T, const N: usize, const FLAGS: u8> MpmcRing<T, N, FLAGS> {
                 );
             // Ringbuffer is full, we cant overwrite :,(
             } else if slot_state == (((pos - N) << 1) | 1usize) as u32 {
-                return false;
+                return Err(value);
             }
         }
     }
 
-    pub fn polled_push(&self, value: T) {
-        while !self.try_push(value) {}
+    pub fn spin_push(&self, mut value: T) {
+        while let Err(val) = self.try_push(value) {
+            value = val;
+            hint::spin_loop();
+        }
     }
 
     pub fn poll(&self) -> Option<T> {
