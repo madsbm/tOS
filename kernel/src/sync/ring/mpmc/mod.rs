@@ -1,41 +1,31 @@
 use core::{
     hint,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use crate::sync::ring::{
     Ring,
     mpmc::{
         config::{AtomicWidth, Flags, U64},
+        payload::Payload,
         slot::AtomicSlotEncoding,
     },
 };
 
 pub mod config;
+pub mod payload;
 pub mod slot;
 
-pub struct MpmcRing<T, const N: usize, const FLAGS: u8, W: AtomicWidth = U64> {
+pub struct MpmcRing<T, const N: usize, const FLAGS: u8, W: AtomicWidth<N> = U64> {
     ring: Ring<W::Atomic, T, N>,
-    read_idx: AtomicUsize,
-    write_idx: AtomicUsize,
+    read_idx: AtomicU32,
+    write_idx: AtomicU32,
 }
 
-impl<T, const N: usize, const FLAGS: u8, W: AtomicWidth> MpmcRing<T, N, FLAGS, W> {
-    pub const LOG_CAP: u32 = {
-        assert!(N.count_ones() == 1, "N must be a power of two!");
-        N.trailing_zeros()
-    };
-    pub const STATE_BITS: u32 = Self::LOG_CAP + 1;
-    pub const PAYLOAD_BITS: u32 = {
-        let SIZE = W::BITS - Self::STATE_BITS;
-        assert!(
-            core::mem::size_of::<T>() * 8 <= SIZE as usize,
-            "T is too large for the selected atomic slot encoding"
-        );
-
-        SIZE
-    };
-
+// TODO: some compile time assertion that size_of::<T>() * 8 <= W::PAYLOAD_BITS
+impl<T: Payload<T, W, N>, const N: usize, const FLAGS: u8, W: AtomicWidth<N>>
+    MpmcRing<T, N, FLAGS, W>
+{
     pub const fn flags() -> Flags {
         Flags::from(FLAGS)
     }
@@ -49,22 +39,21 @@ impl<T, const N: usize, const FLAGS: u8, W: AtomicWidth> MpmcRing<T, N, FLAGS, W
     }
 
     pub fn try_push(&self, value: T) -> Result<(), T> {
+        let payload = T::to_int(value);
+
         loop {
             let pos = self.write_idx.load(Ordering::Relaxed);
-            let slot = &self.ring[pos];
+            let slot = &self.ring[pos as usize];
 
             let slot_state = slot.state();
             // Slot doesnt hold data (LSB = 0) and FIFO matches
             if slot_state == (pos << 1) as u32 {
                 // TODO: Figure out how to pass the PAYLOAD_BITS and STATE_BITS
                 // to the AtomicSlotEncoding, such they can be used as masks.
-                let old = W::Atomic::pack(0, pos, false);
-                let old = W::Atomic::pack(value, pos, true);
+                let old = W::pack_state(pos);
+                let new = W::pack(payload, pos | 1);
 
-                match unsafe {
-                    slot.packed
-                        .compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst)
-                } {
+                match slot.compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst) {
                     Err(_) => continue,
                     Ok(_) => {
                         if const { !Self::lazy_push() } {
@@ -81,9 +70,7 @@ impl<T, const N: usize, const FLAGS: u8, W: AtomicWidth> MpmcRing<T, N, FLAGS, W
                 }
             // Case A: help the thread who got the spot with advancing the write idx
             // Case B: this slot was already produced and consumed before we saw it, but we can help advance the write idx.
-            } else if (slot_state == ((pos << 1) | 1usize) as u32)
-                || (slot_state == ((pos + N) << 1) as u32)
-            {
+            } else if (slot_state == (pos << 1) | 1u32) || (slot_state == (pos + (N as u32)) << 1) {
                 let _ = self.write_idx.compare_exchange(
                     pos,
                     pos + 1,
@@ -91,8 +78,8 @@ impl<T, const N: usize, const FLAGS: u8, W: AtomicWidth> MpmcRing<T, N, FLAGS, W
                     Ordering::Relaxed,
                 );
             // Ringbuffer is full, we cant overwrite :,(
-            } else if slot_state == (((pos - N) << 1) | 1usize) as u32 {
-                return Err(value);
+            } else if slot_state == (pos - (N as u32)) << 1 {
+                return Err(T::from_int(payload));
             }
         }
     }
