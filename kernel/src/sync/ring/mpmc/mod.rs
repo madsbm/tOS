@@ -40,9 +40,10 @@ impl<T: Payload<T, W, N>, const N: usize, const FLAGS: u8, W: AtomicWidth<N>>
 
     pub fn try_push(&self, value: T) -> Result<(), T> {
         let payload = T::to_int(value);
+        let mut pos: u32;
 
         loop {
-            let pos = self.write_idx.load(Ordering::Relaxed);
+            pos = self.write_idx.load(Ordering::Relaxed);
             let slot = &self.ring[pos as usize];
 
             let slot_state = slot.state();
@@ -88,6 +89,46 @@ impl<T: Payload<T, W, N>, const N: usize, const FLAGS: u8, W: AtomicWidth<N>>
         while let Err(val) = self.try_push(value) {
             value = val;
             hint::spin_loop();
+        }
+    }
+
+    pub fn pop(&self, buf: &mut T) -> bool {
+        let mut pos: u32;
+
+        loop {
+            pos = self.read_idx.load(Ordering::Relaxed);
+            let slot_atomic = &self.ring[pos as usize];
+
+            let slot_content = slot_atomic.load(Ordering::Acquire);
+
+            let slot_state = W::state(slot_content);
+            // Case: slot holds data, and generation matches
+            if slot_state == pos | 1 {
+                let empty = W::pack_state((pos + N as u32) << 1);
+
+                match slot_atomic.compare_exchange(
+                    slot_content,
+                    empty,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Err(_) => continue,
+                    Ok(_) => {
+                        T::store(buf, W::payload(slot_content));
+
+                        if const { !Self::lazy_pop() } {
+                            let _ = self.read_idx.compare_exchange(
+                                pos,
+                                pos + 1,
+                                Ordering::Release,
+                                Ordering::Relaxed,
+                            );
+                        }
+
+                        return true;
+                    }
+                }
+            }
         }
     }
 

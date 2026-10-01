@@ -59,6 +59,8 @@ pub trait AtomicWidth<const N: usize> {
 
     fn pack_state(state: u32) -> Self::Int;
     fn pack(payload: Self::Int, state: u32) -> Self::Int;
+    fn state(of: Self::Int) -> u32;
+    fn payload(of: Self::Int) -> Self::Int;
 }
 
 pub enum U64 {}
@@ -79,7 +81,15 @@ impl<const N: usize> AtomicWidth<N> for U64 {
     }
 
     fn pack_state(state: u32) -> Self::Int {
-        (state as Self::Int) << <Self as AtomicWidth<N>>::STATE_BITS
+        (state as Self::Int) << <Self as AtomicWidth<N>>::PAYLOAD_BITS
+    }
+
+    fn state(of: Self::Int) -> u32 {
+        (of >> <Self as AtomicWidth<N>>::PAYLOAD_BITS) as u32
+    }
+
+    fn payload(of: Self::Int) -> Self::Int {
+        of & <Self as AtomicWidth<N>>::PAYLOAD_MASK
     }
 }
 
@@ -99,6 +109,14 @@ impl<const N: usize> AtomicWidth<N> for U128 {
 
     fn pack_state(state: u32) -> Self::Int {
         (state as Self::Int) << <Self as AtomicWidth<N>>::STATE_BITS
+    }
+
+    fn state(of: Self::Int) -> u32 {
+        (of >> <Self as AtomicWidth<N>>::PAYLOAD_BITS) as u32
+    }
+
+    fn payload(of: Self::Int) -> Self::Int {
+        of & <Self as AtomicWidth<N>>::PAYLOAD_MASK
     }
 }
 
