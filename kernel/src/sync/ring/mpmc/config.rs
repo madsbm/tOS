@@ -1,6 +1,13 @@
-use core::ops::BitOr;
+use core::{
+    marker::PhantomData,
+    ops::{BitAnd, BitOr, Shl, Shr},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-use crate::sync::ring::mpmc::slot::{AtomicSlot64, AtomicSlot128, AtomicSlotEncoding};
+use crate::sync::{
+    atomics::atomic128::AtomicU128,
+    ring::mpmc::slot::{AtomicSlot64, AtomicSlot128, AtomicSlotEncoding},
+};
 
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,101 +44,89 @@ impl BitOr for Flags {
     }
 }
 
-pub trait AtomicWidth<const N: usize> {
-    type Int: Copy;
-    type Atomic: AtomicSlotEncoding<Int = Self::Int>;
+pub trait AtomicWord: Sized {
+    type Int: Copy
+        + Eq
+        + From<u32>
+        + Shl<u32, Output = Self::Int>
+        + Shr<u32, Output = Self::Int>
+        + BitAnd<Output = Self::Int>
+        + BitOr<Output = Self::Int>;
 
     const BITS: u32;
-    const LOG_CAP: u32 = {
-        assert!(N.count_ones() == 1, "N must be a power of two!");
-        N.trailing_zeros()
+    const ZERO: Self;
+
+    fn load(&self, o: Ordering) -> Self::Int;
+    fn compare_exchange(
+        &self,
+        old: Self::Int,
+        new: Self::Int,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<Self::Int, Self::Int>;
+}
+
+macro_rules! impl_word {
+    ($atomic:ty, $int:ty) => {
+        impl AtomicWord for $atomic {
+            type Int = $int;
+            const BITS: u32 = <$int>::BITS;
+            const ZERO: Self = <$atomic>::new(0);
+
+            #[inline(always)]
+            fn load(&self, o: Ordering) -> $int {
+                <$atomic>::load(self, o)
+            }
+
+            fn compare_exchange(
+                &self,
+                old: Self::Int,
+                new: Self::Int,
+                success: Ordering,
+                failure: Ordering,
+            ) -> Result<Self::Int, Self::Int> {
+                <$atomic>::compare_exchange(self, old, new, success, failure)
+            }
+        }
+    };
+}
+
+impl_word!(AtomicU128, u128);
+impl_word!(AtomicU64, u64);
+
+pub struct Tag<W, const LAP_BITS: u32>(PhantomData<W>);
+
+impl<W: AtomicWord, const LAP_BITS: u32> Tag<W, LAP_BITS> {
+    pub const BITS: u32 = {
+        assert!(
+            LAP_BITS >= 1 && LAP_BITS <= 31,
+            "LAP_BITS must be in 1..=31"
+        );
+        LAP_BITS + 1
     };
 
-    // Seq. needs LOG_CAP + 1 to fit 2N generations
-    const SEQ_BITS: u32 = Self::LOG_CAP + 1;
+    pub const PAYLOAD_BITS: u32 = W::BITS - Self::BITS;
 
-    // State is Seq + ready/pub. bit size
-    const STATE_BITS: u32 = Self::SEQ_BITS + 1;
-    const PAYLOAD_BITS: u32 = Self::BITS - Self::STATE_BITS;
+    const LAP_MASK: u32 = u32::MAX >> (32 - LAP_BITS);
+    const MASK: u32 = u32::MAX >> (32 - Self::BITS);
 
-    const STATE_MASK: Self::Int;
-    const PAYLOAD_MASK: Self::Int;
-
-    fn pack_state(state: u32) -> Self::Int;
-    fn pack(payload: Self::Int, state: u32) -> Self::Int;
-    fn state(of: Self::Int) -> u32;
-    fn payload(of: Self::Int) -> Self::Int;
-}
-
-pub enum U64 {}
-pub enum U128 {}
-
-impl<const N: usize> AtomicWidth<N> for U64 {
-    type Int = u64;
-    type Atomic = AtomicSlot64;
-
-    const BITS: u32 = Self::Atomic::BITS;
-
-    const PAYLOAD_MASK: Self::Int = low_mask_u64(<Self as AtomicWidth<N>>::PAYLOAD_BITS);
-    const STATE_MASK: Self::Int = !(<Self as AtomicWidth<N>>::PAYLOAD_MASK);
-
-    fn pack(payload: Self::Int, state: u32) -> Self::Int {
-        <Self as AtomicWidth<N>>::pack_state(state)
-            | (payload & <Self as AtomicWidth<N>>::PAYLOAD_MASK)
+    #[inline(always)]
+    pub fn new(lap: u32, full: bool) -> W::Int {
+        W::Int::from((lap & Self::LAP_MASK) << 1 | full as u32)
     }
 
-    fn pack_state(state: u32) -> Self::Int {
-        (state as Self::Int) << <Self as AtomicWidth<N>>::PAYLOAD_BITS
+    #[inline(always)]
+    pub fn of(w: W::Int) -> W::Int {
+        w & W::Int::from(Self::MASK)
     }
 
-    fn state(of: Self::Int) -> u32 {
-        (of >> <Self as AtomicWidth<N>>::PAYLOAD_BITS) as u32
+    #[inline(always)]
+    pub fn pack(payload: W::Int, tag: W::Int) -> W::Int {
+        (payload << Self::BITS) | tag
     }
 
-    fn payload(of: Self::Int) -> Self::Int {
-        of & <Self as AtomicWidth<N>>::PAYLOAD_MASK
-    }
-}
-
-impl<const N: usize> AtomicWidth<N> for U128 {
-    type Int = u128;
-    type Atomic = AtomicSlot128;
-
-    const BITS: u32 = Self::Atomic::BITS;
-
-    const PAYLOAD_MASK: Self::Int = low_mask_u128(<Self as AtomicWidth<N>>::PAYLOAD_BITS);
-    const STATE_MASK: Self::Int = !(<Self as AtomicWidth<N>>::PAYLOAD_MASK);
-
-    fn pack(payload: Self::Int, state: u32) -> Self::Int {
-        <Self as AtomicWidth<N>>::pack_state(state)
-            | (payload & <Self as AtomicWidth<N>>::PAYLOAD_MASK)
-    }
-
-    fn pack_state(state: u32) -> Self::Int {
-        (state as Self::Int) << <Self as AtomicWidth<N>>::STATE_BITS
-    }
-
-    fn state(of: Self::Int) -> u32 {
-        (of >> <Self as AtomicWidth<N>>::PAYLOAD_BITS) as u32
-    }
-
-    fn payload(of: Self::Int) -> Self::Int {
-        of & <Self as AtomicWidth<N>>::PAYLOAD_MASK
-    }
-}
-
-const fn low_mask_u64(bits: u32) -> u64 {
-    if bits == 64 {
-        u64::MAX
-    } else {
-        (1 << bits) - 1
-    }
-}
-
-const fn low_mask_u128(bits: u32) -> u128 {
-    if bits == 64 {
-        u128::MAX
-    } else {
-        (1 << bits) - 1
+    #[inline(always)]
+    pub fn payload(w: W::Int) -> W::Int {
+        w >> Self::BITS
     }
 }

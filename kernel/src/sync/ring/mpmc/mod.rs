@@ -6,7 +6,7 @@ use core::{
 use crate::sync::ring::{
     Ring,
     mpmc::{
-        config::{AtomicWidth, Flags, U64},
+        config::{AtomicWord, Flags, U64},
         payload::Payload,
         slot::AtomicSlotEncoding,
     },
@@ -16,14 +16,14 @@ pub mod config;
 pub mod payload;
 pub mod slot;
 
-pub struct MpmcRing<T, const N: usize, const FLAGS: u8, W: AtomicWidth<N> = U64> {
+pub struct MpmcRing<T, const N: usize, const FLAGS: u8, W: AtomicWord<N> = U64> {
     ring: Ring<W::Atomic, T, N>,
     read_idx: AtomicU32,
     write_idx: AtomicU32,
 }
 
 // TODO: some compile time assertion that size_of::<T>() * 8 <= W::PAYLOAD_BITS
-impl<T: Payload<T, W, N>, const N: usize, const FLAGS: u8, W: AtomicWidth<N>>
+impl<T: Payload<T, W, N>, const N: usize, const FLAGS: u8, W: AtomicWord<N>>
     MpmcRing<T, N, FLAGS, W>
 {
     pub const fn flags() -> Flags {
