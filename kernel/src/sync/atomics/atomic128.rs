@@ -32,6 +32,9 @@ impl AtomicU128 {
         success: Ordering,
         failure: Ordering,
     ) -> Result<u128, u128> {
+        // TODO: some runtime checking for whether or not cmpxchg16b op is supported
         unsafe { atomic_cmpxchg(self.v.get(), old, new, success, failure) }
     }
 }
+
+unsafe impl Sync for AtomicU128 {}

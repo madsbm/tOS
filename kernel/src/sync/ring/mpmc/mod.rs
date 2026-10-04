@@ -1,86 +1,113 @@
 use core::{
     hint,
-    sync::atomic::{AtomicU32, Ordering},
+    marker::PhantomData,
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use crate::sync::ring::{
-    Ring,
-    mpmc::{
-        config::{AtomicWord, Flags, U64},
-        payload::Payload,
-        slot::AtomicSlotEncoding,
-    },
+use crate::sync::ring::mpmc::{
+    config::Flags,
+    payload::Payload,
+    slot::{AtomicSlot, AtomicWord, Fill, Take},
 };
 
 pub mod config;
 pub mod payload;
 pub mod slot;
 
-pub struct MpmcRing<T, const N: usize, const FLAGS: u8, W: AtomicWord<N> = U64> {
-    ring: Ring<W::Atomic, T, N>,
+pub struct MpmcRing<
+    T,
+    const N: usize,
+    const FLAGS: u8,
+    const LAP_BITS: u32,
+    W: AtomicWord = AtomicU64,
+> {
+    slots: [AtomicSlot<W, LAP_BITS>; N],
     read_idx: AtomicU32,
     write_idx: AtomicU32,
+    _marker: PhantomData<T>,
 }
 
-// TODO: some compile time assertion that size_of::<T>() * 8 <= W::PAYLOAD_BITS
-impl<T: Payload<T, W, N>, const N: usize, const FLAGS: u8, W: AtomicWord<N>>
-    MpmcRing<T, N, FLAGS, W>
+unsafe impl<T: Send, const N: usize, const FLAGS: u8, const LAP_BITS: u32, W: AtomicWord> Send
+    for MpmcRing<T, N, FLAGS, LAP_BITS, W>
 {
-    pub const fn flags() -> Flags {
-        Flags::from(FLAGS)
+}
+unsafe impl<T: Send, const N: usize, const FLAGS: u8, const LAP_BITS: u32, W: AtomicWord> Sync
+    for MpmcRing<T, N, FLAGS, LAP_BITS, W>
+{
+}
+
+impl<T, const N: usize, const FLAGS: u8, const LAP_BITS: u32, W> MpmcRing<T, N, FLAGS, LAP_BITS, W>
+where
+    T: Payload<W::Int>,
+    W: AtomicWord,
+{
+    const LOG_CAP: u32 = {
+        assert!(N.is_power_of_two(), "N must be a power of two!");
+        N.trailing_zeros()
+    };
+
+    const CHECK: () = {
+        assert!(
+            LAP_BITS + Self::LOG_CAP <= 32,
+            "LAP_BITS + log2(N) must fit into the u32 position counter"
+        );
+        assert!(
+            T::BITS <= AtomicSlot::<W, LAP_BITS>::PAYLOAD_BITS,
+            "payload does not fit next to the tag"
+        );
+    };
+
+    const LAZY_PUSH: bool = Flags::from(FLAGS).contains(Flags::LAZY_PUSH);
+    const LAZY_POP: bool = Flags::from(FLAGS).contains(Flags::LAZY_POP);
+
+    pub const fn new() -> Self {
+        let () = Self::CHECK;
+
+        Self {
+            slots: [const { AtomicSlot::EMPTY }; N],
+            read_idx: AtomicU32::new(0),
+            write_idx: AtomicU32::new(0),
+            _marker: PhantomData,
+        }
     }
 
-    pub const fn lazy_push() -> bool {
-        Self::flags().contains(Flags::LAZY_PUSH)
+    fn slot(&self, pos: u32) -> &AtomicSlot<W, LAP_BITS> {
+        &self.slots[pos as usize & (N - 1)]
     }
 
-    pub const fn lazy_pop() -> bool {
-        Self::flags().contains(Flags::LAZY_POP)
+    fn lap(pos: u32) -> u32 {
+        pos >> Self::LOG_CAP
+    }
+
+    fn try_advance(idx: &AtomicU32, pos: u32) -> bool {
+        idx.compare_exchange(
+            pos,
+            pos.wrapping_add(1),
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .is_ok()
     }
 
     pub fn try_push(&self, value: T) -> Result<(), T> {
-        let payload = T::to_int(value);
-        let mut pos: u32;
+        let payload = value.encode();
 
         loop {
-            pos = self.write_idx.load(Ordering::Relaxed);
-            let slot = &self.ring[pos as usize];
-
-            let slot_state = slot.state();
-            // Slot doesnt hold data (LSB = 0) and FIFO matches
-            if slot_state == (pos << 1) as u32 {
-                // TODO: Figure out how to pass the PAYLOAD_BITS and STATE_BITS
-                // to the AtomicSlotEncoding, such they can be used as masks.
-                let old = W::pack_state(pos);
-                let new = W::pack(payload, pos | 1);
-
-                match slot.compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst) {
-                    Err(_) => continue,
-                    Ok(_) => {
-                        if const { !Self::lazy_push() } {
-                            let _ = self.write_idx.compare_exchange(
-                                pos,
-                                pos + 1,
-                                Ordering::Release,
-                                Ordering::Relaxed,
-                            );
-                        }
-
-                        return Ok(());
+            let pos = self.write_idx.load(Ordering::Relaxed);
+            match self.slot(pos).try_fill(Self::lap(pos), payload) {
+                Fill::Filled => {
+                    if !Self::LAZY_PUSH {
+                        Self::try_advance(&self.write_idx, pos);
                     }
+                    return Ok(());
                 }
-            // Case A: help the thread who got the spot with advancing the write idx
-            // Case B: this slot was already produced and consumed before we saw it, but we can help advance the write idx.
-            } else if (slot_state == (pos << 1) | 1u32) || (slot_state == (pos + (N as u32)) << 1) {
-                let _ = self.write_idx.compare_exchange(
-                    pos,
-                    pos + 1,
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                );
-            // Ringbuffer is full, we cant overwrite :,(
-            } else if slot_state == (pos - (N as u32)) << 1 {
-                return Err(T::from_int(payload));
+                Fill::Behind => {
+                    Self::try_advance(&self.write_idx, pos);
+                }
+                Fill::Full if self.write_idx.load(Ordering::Relaxed) == pos => {
+                    return Err(T::decode(payload));
+                }
+                Fill::Full | Fill::Stale => hint::spin_loop(),
             }
         }
     }
@@ -92,42 +119,21 @@ impl<T: Payload<T, W, N>, const N: usize, const FLAGS: u8, W: AtomicWord<N>>
         }
     }
 
-    pub fn pop(&self, buf: &mut T) -> bool {
-        let mut pos: u32;
-
+    pub fn pop(&self) -> Option<T> {
         loop {
-            pos = self.read_idx.load(Ordering::Relaxed);
-            let slot_atomic = &self.ring[pos as usize];
-
-            let slot_content = slot_atomic.load(Ordering::Acquire);
-
-            let slot_state = W::state(slot_content);
-            // Case: slot holds data, and generation matches
-            if slot_state == pos | 1 {
-                let empty = W::pack_state((pos + N as u32) << 1);
-
-                match slot_atomic.compare_exchange(
-                    slot_content,
-                    empty,
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                ) {
-                    Err(_) => continue,
-                    Ok(_) => {
-                        T::store(buf, W::payload(slot_content));
-
-                        if const { !Self::lazy_pop() } {
-                            let _ = self.read_idx.compare_exchange(
-                                pos,
-                                pos + 1,
-                                Ordering::Release,
-                                Ordering::Relaxed,
-                            );
-                        }
-
-                        return true;
+            let pos = self.read_idx.load(Ordering::Relaxed);
+            match self.slot(pos).try_take(Self::lap(pos)) {
+                Take::Taken(payload) => {
+                    if !Self::LAZY_POP {
+                        Self::try_advance(&self.read_idx, pos);
                     }
+                    return Some(T::decode(payload));
                 }
+                Take::Behind => {
+                    Self::try_advance(&self.read_idx, pos);
+                }
+                Take::Empty if self.read_idx.load(Ordering::Relaxed) == pos => return None,
+                Take::Empty | Take::Stale => hint::spin_loop(),
             }
         }
     }

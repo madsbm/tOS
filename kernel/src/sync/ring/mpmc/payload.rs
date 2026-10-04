@@ -1,7 +1,6 @@
-use crate::sync::ring::mpmc::config::AtomicWord;
+pub trait Payload<I>: Sized {
+    const BITS: u32 = (size_of::<Self>() * 8) as u32;
 
-pub trait Payload<T, W: AtomicWord<N>, const N: usize> {
-    fn to_int(value: T) -> W::Int;
-    fn from_int(int: W::Int) -> T;
-    fn store(buf: &Self, int: W::Int);
+    fn encode(self) -> I;
+    fn decode(bits: I) -> Self;
 }
