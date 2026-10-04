@@ -15,7 +15,7 @@ Currently, the network stack supports TCP/IP and UDP/IP. It has a very basic imp
 
 ## Environment
 
-As Atomic{U,I}128 aren't yet completely stabilized in Rust, tOS has rolled it's own implementations! Instead of generating ASM directly, it instead depends on the core::intrinsics to allow the LLVM backend to optimize the atomic operations. That means however, that the project can be a little sensitive to compiler versions. In my environment, I can compile using:
+As Atomic{U,I}128 aren't yet completely stabilized in Rust, tOS has rolled it's own implementations! The project therefore depend on the Rust intrinsics to allow the LLVM backend to optimize the atomic operations. That means however, that the project can be a little sensitive to compiler versions. In my environment, I can compile using:
 
 ```
 rustc 1.101.0-nightly (d080e7dff 2026-09-27)

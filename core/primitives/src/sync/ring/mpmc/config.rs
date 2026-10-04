@@ -1,8 +1,4 @@
-use core::{
-    marker::PhantomData,
-    ops::{BitAnd, BitOr, Shl, Shr},
-    sync::atomic::{AtomicU64, Ordering},
-};
+use core::ops::BitOr;
 
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
