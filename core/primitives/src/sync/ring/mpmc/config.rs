@@ -9,6 +9,7 @@ impl Flags {
 
     pub const LAZY_PUSH: Self = Self(1 << 0);
     pub const LAZY_POP: Self = Self(1 << 1);
+    pub const LAZY: Self = Self::LAZY_POP.union(Self::LAZY_PUSH);
 
     pub const fn from(val: u8) -> Self {
         Self(val)

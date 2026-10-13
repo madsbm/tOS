@@ -98,7 +98,7 @@ impl<W: AtomicWord, const LAP_BITS: u32> AtomicSlot<W, LAP_BITS> {
 
     #[inline(always)]
     pub fn pack(payload: W::Int, tag: W::Int) -> W::Int {
-        (payload << Self::TAG_BITS) | (tag & Self::TAG_BITS.into())
+        (payload << Self::TAG_BITS) | tag
     }
 
     #[inline(always)]

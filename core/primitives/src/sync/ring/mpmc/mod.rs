@@ -4,10 +4,13 @@ use core::{
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use crate::sync::ring::mpmc::{
-    config::Flags,
-    payload::Payload,
-    slot::{AtomicSlot, AtomicWord, Fill, Take},
+use crate::sync::{
+    atomics::atomic128::AtomicU128,
+    ring::mpmc::{
+        config::Flags,
+        payload::Payload,
+        slot::{AtomicSlot, AtomicWord, Fill, Take},
+    },
 };
 
 pub mod config;
@@ -17,8 +20,8 @@ pub mod slot;
 pub struct MpmcRing<
     T,
     const N: usize,
-    const FLAGS: u8,
-    const LAP_BITS: u32,
+    const FLAGS: u8 = 0,
+    const LAP_BITS: u32 = 16,
     W: AtomicWord = AtomicU64,
 > {
     slots: [AtomicSlot<W, LAP_BITS>; N],
@@ -35,6 +38,48 @@ unsafe impl<T: Send, const N: usize, const FLAGS: u8, const LAP_BITS: u32, W: At
     for MpmcRing<T, N, FLAGS, LAP_BITS, W>
 {
 }
+
+pub type LazyMpmcRing<
+    T,
+    const N: usize,
+    const FLAGS: u8 = { Flags::LAZY.bits() },
+    const LAP_BITS: u32 = 16,
+> = MpmcRing<T, N, FLAGS, LAP_BITS>;
+
+pub type LazyUnorderedMpmcRing<
+    T,
+    const N: usize,
+    const LAP_BITS: u32 = 8,
+    const FLAGS: u8 = { Flags::LAZY.bits() },
+> = MpmcRing<T, N, FLAGS, LAP_BITS>;
+
+pub type UnorderedMpmcRing<
+    T,
+    const N: usize,
+    const LAP_BITS: u32 = 8,
+    const FLAGS: u8 = { Flags::NONE.bits() },
+> = MpmcRing<T, N, FLAGS, LAP_BITS>;
+
+pub type BigLazyMpmcRing<
+    T,
+    const N: usize,
+    const FLAGS: u8 = { Flags::LAZY.bits() },
+    const LAP_BITS: u32 = 16,
+> = MpmcRing<T, N, FLAGS, LAP_BITS, AtomicU128>;
+
+pub type BigLazyUnorderedMpmcRing<
+    T,
+    const N: usize,
+    const LAP_BITS: u32 = 8,
+    const FLAGS: u8 = { Flags::LAZY.bits() },
+> = MpmcRing<T, N, FLAGS, LAP_BITS, AtomicU128>;
+
+pub type BigUnorderedMpmcRing<
+    T,
+    const N: usize,
+    const LAP_BITS: u32 = 8,
+    const FLAGS: u8 = { Flags::NONE.bits() },
+> = MpmcRing<T, N, FLAGS, LAP_BITS, AtomicU128>;
 
 impl<T, const N: usize, const FLAGS: u8, const LAP_BITS: u32, W> MpmcRing<T, N, FLAGS, LAP_BITS, W>
 where
@@ -55,6 +100,7 @@ where
             T::BITS <= AtomicSlot::<W, LAP_BITS>::PAYLOAD_BITS,
             "payload does not fit next to the tag"
         );
+        assert!(LAP_BITS >= 2, "need lap-1, lap, lap+1 distinguishable");
     };
 
     const LAZY_PUSH: bool = Flags::from(FLAGS).contains(Flags::LAZY_PUSH);

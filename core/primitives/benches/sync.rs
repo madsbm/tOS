@@ -1,5 +1,8 @@
 use divan::{Bencher, black_box};
-use primitives::sync::{ring::mpmc::MpmcRing, spinlock::SpinLock};
+use primitives::sync::{
+    ring::mpmc::{LazyUnorderedMpmcRing, MpmcRing},
+    spinlock::SpinLock,
+};
 
 fn main() {
     divan::main()
@@ -19,9 +22,9 @@ fn spinlock_contended(b: Bencher) {
 
 #[divan::bench(threads = [1, 2, 4, 8])]
 fn mpmc_push_pop(b: Bencher) {
-    // let ring = MpmcRing::<u64, 1024, 0, 16>::new();
-    // b.bench(|| {
-    //     let _ = ring.try_push(black_box(42));
-    //     black_box(ring.pop())
-    // });
+    let ring = LazyUnorderedMpmcRing::<u32, 1024>::new();
+    b.bench(|| {
+        let _ = ring.try_push(black_box(42));
+        black_box(ring.pop())
+    });
 }
