@@ -70,8 +70,8 @@ impl fmt::Display for Pc {
 
 #[divan::bench(
 	types = [
-		Strict, Lazy, Unordered, LazyUnordered,
-		BigStrict, BigLazy, BigUnordered, BigLazyUnordered
+		Strict, Lazy,
+		BigStrict, BigLazy,
 	],
 	args = [Pc(1, 1), Pc(1, 4), Pc(4, 1), Pc(4, 4), Pc(1, 8), Pc(8, 1)],
 	sample_count = 30

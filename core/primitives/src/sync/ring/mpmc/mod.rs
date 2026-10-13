@@ -1,6 +1,7 @@
 use core::{
     hint,
     marker::PhantomData,
+    ops::Deref,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
@@ -17,6 +18,17 @@ pub mod config;
 pub mod payload;
 pub mod slot;
 
+#[repr(align(128))]
+struct CachePadded<T>(T);
+
+impl<T> Deref for CachePadded<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 pub struct MpmcRing<
     T,
     const N: usize,
@@ -25,8 +37,8 @@ pub struct MpmcRing<
     W: AtomicWord = AtomicU64,
 > {
     slots: [AtomicSlot<W, LAP_BITS>; N],
-    read_idx: AtomicU32,
-    write_idx: AtomicU32,
+    read_idx: CachePadded<AtomicU32>,
+    write_idx: CachePadded<AtomicU32>,
     _marker: PhantomData<T>,
 }
 
@@ -118,8 +130,8 @@ where
 
         Self {
             slots: [const { AtomicSlot::EMPTY }; N],
-            read_idx: AtomicU32::new(0),
-            write_idx: AtomicU32::new(0),
+            read_idx: CachePadded(AtomicU32::new(0)),
+            write_idx: CachePadded(AtomicU32::new(0)),
             _marker: PhantomData,
         }
     }
