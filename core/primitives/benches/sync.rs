@@ -19,12 +19,3 @@ fn spinlock_contended(b: Bencher) {
     let lock = SpinLock::new(0u64);
     b.bench(|| *lock.lock() += 1);
 }
-
-#[divan::bench(threads = [1, 2, 4, 8])]
-fn mpmc_push_pop(b: Bencher) {
-    let ring = LazyUnorderedMpmcRing::<u32, 1024>::new();
-    b.bench(|| {
-        let _ = ring.try_push(black_box(42));
-        black_box(ring.pop())
-    });
-}

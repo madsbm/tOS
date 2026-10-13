@@ -20,7 +20,7 @@ pub mod slot;
 pub struct MpmcRing<
     T,
     const N: usize,
-    const FLAGS: u8 = 0,
+    const FLAGS: u8 = { Flags::NONE.bits() },
     const LAP_BITS: u32 = 16,
     W: AtomicWord = AtomicU64,
 > {
@@ -38,6 +38,13 @@ unsafe impl<T: Send, const N: usize, const FLAGS: u8, const LAP_BITS: u32, W: At
     for MpmcRing<T, N, FLAGS, LAP_BITS, W>
 {
 }
+
+pub type BigMpmcRing<
+    T,
+    const N: usize,
+    const FLAGS: u8 = { Flags::NONE.bits() },
+    const LAP_BITS: u32 = 16,
+> = MpmcRing<T, N, FLAGS, LAP_BITS, AtomicU128>;
 
 pub type LazyMpmcRing<
     T,
